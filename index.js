@@ -32,6 +32,11 @@ async function refreshAccessToken() {
         accessToken = tokenResponse.data.access_token;
         refreshToken = tokenResponse.data.refresh_token;
         tokenExpiresAt = tokenResponse.data.expires_at;
+        console.log('Token refreshed:', {
+            accessToken: accessToken.substring(0, 10) + '...',
+            refreshToken: refreshToken.substring(0, 10) + '...',
+            expiresAt: new Date(tokenExpiresAt * 1000).toISOString()
+        });
         return accessToken;
     } catch (error) {
         console.error('Error refreshing token:', error.message);
@@ -41,7 +46,9 @@ async function refreshAccessToken() {
 
 async function ensureValidToken() {
     const now = Math.floor(Date.now() / 1000);
+    console.log('Token expires at:', tokenExpiresAt);
     if (now >= tokenExpiresAt) {
+        console.log('Refreshing token...');
         await refreshAccessToken();
     }
     return accessToken;
@@ -66,6 +73,11 @@ app.get('/callback', async (req, res) => {
         accessToken = tokenResponse.data.access_token;
         refreshToken = tokenResponse.data.refresh_token;
         tokenExpiresAt = tokenResponse.data.expires_at;
+        console.log('Initial token received:', {
+            accessToken: accessToken.substring(0, 10) + '...',
+            refreshToken: refreshToken.substring(0, 10) + '...',
+            expiresAt: new Date(tokenExpiresAt * 1000).toISOString()
+        });
         res.send(`Authentication successful! You can now fetch an activity by visiting /activity/:id`);
     } catch (error) {
         res.send(`Error: ${error.response?.data?.message || error.message}`);
@@ -90,7 +102,7 @@ app.get('/activities', async (req, res) => {
     }
 });
 
-app.get('/activity/:id', async (req, res) => {
+app.get('/activities/:id', async (req, res) => {
     const { id } = req.params;
 
     if (!refreshToken) {
@@ -105,6 +117,53 @@ app.get('/activity/:id', async (req, res) => {
             }
         });
         res.json(activityResponse.data);
+    } catch (error) {
+        res.send(`Error: ${error.response?.data?.message || error.message}`);
+    }
+});
+
+app.get('/athlete', async (req, res) => {
+    if (!refreshToken) {
+        return res.send('You need to authenticate first by visiting the home page.');
+    }
+
+    try {
+        const validToken = await ensureValidToken();
+        const athleteResponse = await axios.get(`https://www.strava.com/api/v3/athlete`, {
+            headers: {
+                Authorization: `Bearer ${validToken}`
+            }
+        });
+        res.json(athleteResponse.data);
+    } catch (error) {
+        res.send(`Error: ${error.response?.data?.message || error.message}`);
+    }
+});
+
+app.get('/athlete/stats', async (req, res) => {
+    if (!refreshToken) {
+        return res.send('You need to authenticate first by visiting the home page.');
+    }
+
+    try {
+        const validToken = await ensureValidToken();
+        // First get the authenticated athlete's ID
+        const athleteResponse = await axios.get(`https://www.strava.com/api/v3/athlete`, {
+            headers: {
+                Authorization: `Bearer ${validToken}`
+            }
+        });
+
+        const athleteId = athleteResponse.data.id;
+
+        // Then get their stats
+        const statsResponse = await axios.get(`https://www.strava.com/api/v3/athletes/${athleteId}/stats`, {
+            headers: {
+                Authorization: `Bearer ${validToken}`
+            }
+        });
+
+        res.json(statsResponse.data);
     } catch (error) {
         res.send(`Error: ${error.response?.data?.message || error.message}`);
     }
