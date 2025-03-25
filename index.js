@@ -21,77 +21,7 @@ let refreshToken = '';
 let tokenExpiresAt = 0;
 let athleteId = '';
 
-const runawayRunawayRefeshTokensUrl = "https://runaway-node-api-203308554831.us-central1.run.app/refresh-tokens"
-
-// Add error handling helper
-function handleError(error, res) {
-    console.error('Error details:', {
-        message: error.message,
-        response: error.response?.data,
-        status: error.response?.status
-    });
-
-    if (error.response?.status === 401) {
-        return res?.send('Authentication expired. Please login again at the home page.');
-    }
-
-    const errorMessage = error.response?.data?.message || error.message;
-    return res?.send(`Error: ${errorMessage}`);
-}
-
-async function refreshAccessToken() {
-    try {
-        if (!athleteId) {
-            throw new Error('No athlete ID available for token refresh');
-        }
-
-        // First get new tokens from runaway service
-        const runawayResponse = await axios.get(`${runawayRunawayRefeshTokensUrl}/${athleteId}`)
-            .catch(error => {
-                throw new Error(`Failed to fetch from runaway service: ${error.message}`);
-            });
-
-        const storedRefreshToken = runawayResponse.data.refresh_token;
-        if (!storedRefreshToken) {
-            throw new Error('No refresh token found in runaway service');
-        }
-
-        // Use the stored refresh token to get new access token from Strava
-        const tokenResponse = await axios.post('https://www.strava.com/oauth/token', querystring.stringify({
-            client_id: clientID,
-            client_secret: clientSecret,
-            refresh_token: storedRefreshToken,
-            grant_type: 'refresh_token'
-        })).catch(error => {
-            throw new Error(`Strava token refresh failed: ${error.response?.data?.message || error.message}`);
-        });
-
-        accessToken = tokenResponse.data.access_token;
-        refreshToken = tokenResponse.data.refresh_token;
-        tokenExpiresAt = tokenResponse.data.expires_at;
-
-        // Update the stored tokens in runaway service
-        await axios.post(runawayRunawayRefeshTokensUrl, {
-            athlete_id: athleteId,
-            refresh_token: refreshToken,
-            access_token: accessToken,
-            expires_at: tokenExpiresAt
-        }).catch(error => {
-            console.error('Failed to update runaway service:', error.message);
-            // Continue execution even if update fails
-        });
-
-        console.log('Token refreshed successfully');
-        return accessToken;
-    } catch (error) {
-        console.error('Token refresh failed:', {
-            error: error.message,
-            athleteId,
-            tokenExpiresAt: new Date(tokenExpiresAt * 1000).toISOString()
-        });
-        throw error;
-    }
-}
+const runawayRefeshTokensUrl = "https://runaway-node-api-203308554831.us-central1.run.app/refresh-tokens"
 
 async function ensureValidToken() {
     try {
@@ -200,7 +130,6 @@ app.get('/athlete', async (req, res) => {
     }
 
     try {
-        const validToken = await ensureValidToken();
         const athleteResponse = await axios.get(`https://www.strava.com/api/v3/athlete`, {
             headers: {
                 Authorization: `Bearer ${validToken}`
