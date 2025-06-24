@@ -3,11 +3,37 @@ import axios from 'axios';
 import querystring from 'querystring';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import crypto from 'crypto';
+import cookieParser from 'cookie-parser';
 
 dotenv.config();
 
 const app = express();
 app.use(cors());
+app.use(express.json());
+app.use(cookieParser());
+
+// Middleware to get userId from session cookie
+async function getUserId(req, res, next) {
+    const sessionId = req.cookies?.sessionId;
+
+    if (!sessionId) {
+        req.userId = null;
+        return next();
+    }
+
+    try {
+        const response = await axios.get(`${runawayTokensUrl}/sessions/${sessionId}`);
+        req.userId = response.data.user_id;
+    } catch (error) {
+        console.error('Failed to get userId from session:', error.message);
+        req.userId = null;
+    }
+
+    next();
+}
+
+app.use(getUserId);
 const port = parseInt(process.env.PORT) || 8080;
 
 const clientID = process.env.STRAVA_CLIENT_ID;
@@ -16,9 +42,6 @@ const redirectURI = process.env.NODE_ENV === 'production'
     ? `https://strava-node-api-203308554831.us-central1.run.app/callback`
     : `http://localhost:${port}/callback`;
 const scope = 'read,activity:read_all';
-let accessToken = '';
-let refreshToken = '';
-let tokenExpiresAt = 0;
 
 const runawayTokensUrl = "https://runaway-node-api-203308554831.us-central1.run.app"
 
@@ -42,22 +65,54 @@ app.get('/callback', async (req, res) => {
             grant_type: 'authorization_code'
         }));
 
-        accessToken = tokenResponse.data.access_token;
-        refreshToken = tokenResponse.data.refresh_token;
-        tokenExpiresAt = tokenResponse.data.expires_at;
+        const accessToken = tokenResponse.data.access_token;
+        const refreshToken = tokenResponse.data.refresh_token;
+        const tokenExpiresAt = tokenResponse.data.expires_at;
 
-        const tokenExpiresAtDate = new Date(tokenExpiresAt * 1000);
+        // const tokenExpiresAtDate = new Date(tokenExpiresAt * 1000);
 
-        console.log('Token expires at:', tokenExpiresAtDate);
+        // console.log('Token expires at:', tokenExpiresAtDate);
 
-        const userId = '6819d431-f5c8-4ac6-b59b-67d2010e1e04';
+        // Get user ID from Strava
+        const athleteResponse = await axios.get('https://www.strava.com/api/v3/athlete', {
+            headers: { Authorization: `Bearer ${accessToken}` }
+        });
+        const userId = athleteResponse.data.id.toString();
+
+        const authResponse = await axios.get(`${runawayTokensUrl}/auth/${userId}`);
+        console.log('authResponse:', authResponse.data);
+
+        const authId = authResponse.data.auth_id;
+
+        // Generate session ID and store userId mapping in runaway service
+        const sessionId = crypto.randomBytes(32).toString('hex');
+
+        console.log('userId:', userId);
+        console.log('sessionId:', sessionId);
+        console.log('authId:', authId);
+
+        // Store session mapping
+        await axios.post(`${runawayTokensUrl}/sessions`, {
+            session_id: sessionId,
+            user_id: userId,
+            auth_id: authId
+        }).catch(error => {
+            console.error('Failed to store session in runaway service:', error.message);
+        });
+
+        // Set session cookie
+        res.cookie('sessionId', sessionId, {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === 'production',
+            maxAge: 24 * 60 * 60 * 1000 // 24 hours
+        });
 
         // Store token in runaway service
         await axios.post(`${runawayTokensUrl}/tokens`, {
             user_id: userId,
             refresh_token: refreshToken,
             access_token: accessToken,
-            expires_at: tokenExpiresAtDate
+            expires_at: tokenExpiresAt
         }).catch(error => {
             console.error('Failed to store tokens in runaway service:', error.message);
             // Continue execution even if storage fails
@@ -65,17 +120,19 @@ app.get('/callback', async (req, res) => {
 
         res.send('Authentication successful! You can now use the API.');
     } catch (error) {
+        console.error('Error during authentication:', error.message);
         handleError(error, res);
     }
 });
 
 app.get('/activities', async (req, res) => {
+    console.log('/activities called');
     try {
-        if (!refreshToken) {
+        if (!req.userId) {
             return res.status(401).send('Please authenticate first by visiting the home page');
         }
 
-        const validToken = await ensureValidToken();
+        const validToken = await ensureValidToken(req.userId);
         const activityResponse = await axios.get('https://www.strava.com/api/v3/activities', {
             headers: { Authorization: `Bearer ${validToken}` }
         });
@@ -86,11 +143,21 @@ app.get('/activities', async (req, res) => {
     }
 });
 
-app.get('/activities/:id', async (req, res) => {
-    const { id } = req.params;
+app.get('/activities/:userId/:id', async (req, res) => {
+    console.log('/activities/:userId/:id called');
+    const { userId, id } = req.params;
+
+    console.log('userId:', userId);
+    console.log('activityId:', id);
 
     try {
-        const validToken = await ensureValidToken();
+        console.log('req.userId:', userId);
+        if (!userId) {
+            return res.status(401).send('Please authenticate first by visiting the home page');
+        }
+
+        const validToken = await ensureValidToken(userId);
+        console.log('validToken:', validToken);
         const activityResponse = await axios.get(`https://www.strava.com/api/v3/activities/${id}`, {
             headers: {
                 Authorization: `Bearer ${validToken}`
@@ -102,26 +169,42 @@ app.get('/activities/:id', async (req, res) => {
     }
 });
 
-app.get('/athlete', async (req, res) => {
+app.get(`/athlete/:userId`, async (req, res) => {
+    console.log('/athlete called');
+    const { userId } = req.params;
     try {
-        const validToken = await ensureValidToken();
+        if (!userId) {
+            return res.status(401).send('Please authenticate first by visiting the home page');
+        }
+
+        const validToken = await ensureValidToken(userId);
         const athleteResponse = await axios.get(`https://www.strava.com/api/v3/athlete`, {
             headers: {
                 Authorization: `Bearer ${validToken}`
             }
         });
+        console.log('athleteResponse:', athleteResponse);
+        console.log('athleteResponse.data:', athleteResponse.data);
         res.json(athleteResponse.data);
     } catch (error) {
         handleError(error, res);
     }
 });
 
-app.get('/athlete/stats', async (req, res) => {
+app.get('/athlete/stats/:userId', async (req, res) => {
+    console.log('/athlete/stats called');
+    const { userId } = req.params;
     try {
-        const validToken = await ensureValidToken();
+        if (!userId) {
+            return res.status(401).send('Please authenticate first by visiting the home page');
+        }
+
+        console.log('userId:', userId);
+
+        const validToken = await ensureValidToken(userId);
 
         // Then get their stats
-        const statsResponse = await axios.get(`https://www.strava.com/api/v3/athletes/${athleteId}/stats`, {
+        const statsResponse = await axios.get(`https://www.strava.com/api/v3/athletes/${userId}/stats`, {
             headers: {
                 Authorization: `Bearer ${validToken}`
             }
@@ -134,6 +217,7 @@ app.get('/athlete/stats', async (req, res) => {
 });
 
 app.get('/tokens/:userId', async (req, res) => {
+    console.log('/tokens/:userId called');
     try {
         const { userId } = req.params;
 
@@ -162,13 +246,16 @@ app.get('/tokens/:userId', async (req, res) => {
     }
 });
 
-app.listen(port, () => {
-    console.log(`Server is running on http://localhost:${port}`);
+app.listen(port, '0.0.0.0', () => {
+    console.log(`Server is running on port ${port}`);
 });
 
-async function ensureValidToken() {
+async function ensureValidToken(userId) {
     try {
-        const userId = '6819d431-f5c8-4ac6-b59b-67d2010e1e04'; // Using the hardcoded userId
+        if (!userId) {
+            throw new Error('User ID is required');
+        }
+
         const now = Math.floor(Date.now() / 1000);
 
         // First try to get tokens from runaway service
@@ -180,10 +267,7 @@ async function ensureValidToken() {
 
             if (now < storedExpiresAt) {
                 console.log('Using valid token from runaway service');
-                // Use the stored access token since it's still valid
-                accessToken = runawayResponse.data.access_token;
-                tokenExpiresAt = storedExpiresAt;
-                return accessToken;
+                return runawayResponse.data.access_token;
             }
 
             console.log('Stored token expired, refreshing...');
@@ -249,20 +333,24 @@ async function refreshAccessToken(athleteId) {
 
         console.log('Token response:', tokenResponse.data);
 
-        accessToken = tokenResponse.data.access_token;
-        refreshToken = tokenResponse.data.refresh_token;
+        const newAccessToken = tokenResponse.data.access_token;
+        const newRefreshToken = tokenResponse.data.refresh_token;
+
+        console.log('athleteId:', athleteId);
 
         // Update the stored tokens in runaway service
-        await axios.post(`${runawayTokensUrl}/refresh-tokens`, {
+        await axios.post(`${runawayTokensUrl}/tokens`, {
             user_id: athleteId,
-            refresh_token: refreshToken
+            access_token: newAccessToken,
+            refresh_token: newRefreshToken,
+            expires_at: tokenResponse.data.expires_at
         }).catch(error => {
             console.error('Failed to update runaway service:', error.message);
             // Continue execution even if update fails
         });
 
         console.log('Token refreshed successfully');
-        return accessToken;
+        return newAccessToken;
     } catch (error) {
         console.error('Token refresh failed:', {
             error: error.message,
